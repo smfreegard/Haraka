@@ -24,6 +24,11 @@ exports.register = function () {
         // Client default is 127.0.0.1:6379
         client = redis.createClient();
     }
+    if (client) {
+        // Redis will attempt to auto-reconnect
+        client.on(error, function () {});
+    }
+
     this.register_hook('connect', 'incr_concurrency');
     this.register_hook('disconnect', 'decr_concurrency');
 };
@@ -150,18 +155,29 @@ exports.rate_limit = function (connection, key, value, cb) {
 
     connection.logdebug(self, 'key=' + key + ' limit=' + limit + ' ttl=' + ttl);
 
-    client.incr(key, function(err, val) {
+    client.multi().incr(key).ttl(key).exec(function(err, vals) {
         if (err) return cb(err);
-        connection.logdebug(self, 'key=' + key + ' value=' + val);
-        if (parseInt(val) === 1) {
-            // New key; set ttl
+        var val = parseInt(vals[0]);
+        var expires = parseInt(vals[1]);
+        connection.logdebug(self, 'key=' + key + ' value=' + val + ' expires=' + expires);
+        if (expires === -2) {
+            // New key, set expiry
             client.expire(key, ttl, function (err, result) {
                 if (err) {
                     connection.logerror(self, err);
                 }
             });
         }
-        if (parseInt(val) > parseInt(limit)) {
+        if (expires === -1) {
+            // Oops, found a key with no expiry.
+            // Delete it and re-create it.
+            client.multi().del(key).incr(key).expire(key, ttl).exec(function (err) {
+                if (err) return cb(err);
+                return cb(null, false);
+            });
+            return; // Stop here
+        }
+        if (val > parseInt(limit)) {
             // Limit breached
             connection.lognotice(self, key + ' rate ' + val + ' exceeds ' + limit + '/' + ttl + 's');
             return cb(null, true);
