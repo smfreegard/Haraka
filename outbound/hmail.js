@@ -100,11 +100,11 @@ class HMailItem extends events.EventEmitter {
 
             this._stream_bytes_from(this.path, {start: 4, end: todo_len + 3}, (err2, todo_bytes) => {
                 if (todo_bytes.length !== todo_len) {
-                    const wrongLength = "Didn't find right amount of data in todo!"
+                    const wrongLength = `Didn't find right amount of data in todo!: ${err2}`;
                     this.logcrit(wrongLength);
-                    fs.rename(this.path, path.join(queue_dir, "error." + this.filename), (err3) => {
+                    fs.rename(this.path, path.join(queue_dir, `error.${this.filename}`), (err3) => {
                         if (err3) {
-                            this.logerror("Error creating error file after todo read failure (" + this.filename + "): " + err);
+                            this.logerror(`Error creating (error.${this.filename}): ${err3}`);
                         }
                     });
                     this.emit('error', wrongLength); // Note nothing picks this up yet
@@ -548,37 +548,43 @@ class HMailItem extends events.EventEmitter {
             return send_command('MAIL', `FROM:${self.todo.mail_from.format(!smtp_properties.smtp_utf8)}`);
         } // auth_and_mail_phase()
 
+        // IMPORTANT: do STARTTLS before AUTH for security
         function process_ehlo_data () {
             set_ehlo_props();
 
-            // TLS
-            if (!secured && smtp_properties.tls && cfg.enable_tls) {
-                const tls_cfg = obtls.tls_socket.load_tls_ini({role: 'client'});
-                if (!net_utils.ip_in_list(tls_cfg.no_tls_hosts, host) &&
-                    !net_utils.ip_in_list(tls_cfg.no_tls_hosts, self.todo.domain)) {
+            if (secured) return auth_and_mail_phase();              // TLS already negotiated
+            if (!cfg.enable_tls) return auth_and_mail_phase();      // TLS not enabled
+            if (!smtp_properties.tls) return auth_and_mail_phase(); // TLS not advertised by remote
 
-                    self.logdebug(`Trying TLS for domain: ${self.todo.domain}, host: ${host}`);
-
-                    return obtls.check_tls_nogo(host,
-                        () => { // Clear to GO
-                            socket.on('secure', function () {
-                                // Set this flag so we don't try STARTTLS again if it
-                                // is incorrectly offered at EHLO once we are secured.
-                                secured = true;
-                                send_command(mx.using_lmtp ? 'LHLO' : 'EHLO', mx.bind_helo);
-                            });
-                            return send_command('STARTTLS');
-                        },
-                        (when) => { // No GO
-                            self.loginfo(`TLS disabled for ${host} because it was marked as non-TLS on ${when}`);
-                            return auth_and_mail_phase();
-                        }
-                    );
-                }
+            if (obtls.cfg === undefined) {
+                self.logerror(`Oops, TLS config not loaded yet!`);
+                return auth_and_mail_phase();  // no outbound TLS config
             }
 
-            // IMPORTANT: we do STARTTLS before we attempt AUTH for extra security
-            return auth_and_mail_phase();
+            // TLS is configured and available
+
+            // TLS exclude lists checks for MX host or remote domain
+            if (net_utils.ip_in_list(obtls.cfg.no_tls_hosts, host)) return auth_and_mail_phase();
+            if (net_utils.ip_in_list(obtls.cfg.no_tls_hosts, self.todo.domain)) return auth_and_mail_phase();
+
+            // Check Redis and skip for hosts that failed past TLS upgrade
+            return obtls.check_tls_nogo(host,
+                () => { // Clear to GO
+                    self.logdebug(`Trying TLS for domain: ${self.todo.domain}, host: ${host}`);
+
+                    socket.on('secure', function () {
+                        // Set this flag so we don't try STARTTLS again if it
+                        // is incorrectly offered at EHLO once we are secured.
+                        secured = true;
+                        send_command(mx.using_lmtp ? 'LHLO' : 'EHLO', mx.bind_helo);
+                    });
+                    return send_command('STARTTLS');
+                },
+                (when) => { // No GO
+                    self.loginfo(`TLS disabled for ${host} because it was marked as non-TLS on ${when}`);
+                    return auth_and_mail_phase();
+                }
+            );
 
         } // process_ehlo_data()
 
@@ -612,7 +618,7 @@ class HMailItem extends events.EventEmitter {
             else {
                 self.discard();
             }
-            if (cfg.pool_concurrency_max) {
+            if (cfg.pool_concurrency_max && !mx.using_lmtp) {
                 send_command('RSET');
             }
             else {
@@ -684,7 +690,7 @@ class HMailItem extends events.EventEmitter {
                     rcpt.dsn_smtp_response = response.join(' ');
                     rcpt.dsn_remote_mta = mx.exchange;
                 });
-                send_command(cfg.pool_concurrency_max ? 'RSET' : 'QUIT');
+                send_command(cfg.pool_concurrency_max && !mx.using_lmtp ? 'RSET' : 'QUIT');
                 processing_mail = false;
                 return self.temp_fail(`Upstream error: ${code}${(extc) ? `${extc} ` : ''}${reason}`);
             }
@@ -722,7 +728,7 @@ class HMailItem extends events.EventEmitter {
                         rcpt.dsn_smtp_response = response.join(' ');
                         rcpt.dsn_remote_mta = mx.exchange;
                     });
-                    send_command(cfg.pool_concurrency_max ? 'RSET' : 'QUIT');
+                    send_command(cfg.pool_concurrency_max && !mx.using_lmtp ? 'RSET' : 'QUIT');
                     processing_mail = false;
                     return self.temp_fail(`Upstream error: ${code} ${(extc) ? `${extc} ` : ''}${reason}`);
                 }
@@ -769,7 +775,7 @@ class HMailItem extends events.EventEmitter {
                         rcpt.dsn_smtp_response = response.join(' ');
                         rcpt.dsn_remote_mta = mx.exchange;
                     });
-                    send_command(cfg.pool_concurrency_max ? 'RSET' : 'QUIT');
+                    send_command(cfg.pool_concurrency_max && !mx.using_lmtp ? 'RSET' : 'QUIT');
                     processing_mail = false;
                     return self.bounce(reason, { mx: mx });
                 }
