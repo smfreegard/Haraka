@@ -96,7 +96,11 @@ exports._load_cur_queue = function (pid, cb_name, cb) {
 
 exports.load_queue_files = function (pid, cb_name, files, callback) {
     const self = exports;
-    if (files.length === 0) return;
+
+    if (files.length === 0) {
+        if (callback) callback();
+        return;
+    }
 
     if (cfg.disabled && cb_name === '_add_file') {
         // try again in 1 second if delivery is disabled
@@ -132,7 +136,7 @@ exports.load_queue_files = function (pid, cb_name, files, callback) {
                         load_queue.push(new_filename);
                     }
                     else {
-                        temp_fail_queue.add(next_process - self.cur_time, function () {
+                        temp_fail_queue.add(new_filename, next_process - self.cur_time, function () {
                             load_queue.push(new_filename);
                         });
                     }
@@ -194,7 +198,7 @@ exports.load_queue_files = function (pid, cb_name, files, callback) {
                 }
                 else {
                     logger.logdebug("[outbound] File needs processing later: " + (next_process - self.cur_time) + "ms");
-                    temp_fail_queue.add(next_process - self.cur_time, function () { load_queue.push(file);});
+                    temp_fail_queue.add(file, next_process - self.cur_time, function () { load_queue.push(file);});
                 }
                 async.setImmediate(cb);
             }
@@ -294,7 +298,7 @@ exports._add_file = function (hmail) {
         delivery_queue.push(hmail);
     }
     else {
-        temp_fail_queue.add(hmail.next_process - exports.cur_time, function () {
+        temp_fail_queue.add(hmail.filename, hmail.next_process - exports.cur_time, function () {
             delivery_queue.push(hmail);
         });
     }
